@@ -54,13 +54,11 @@ class VisualInput(nn.Module):
 
     def forward(self, feats, camera, embodiment):
         """feats (B, T, V, P, enc_dim); camera (B, V) RoboJEPA camera id; embodiment (B,) -> (B, T, V, P, dim)."""
-        feats = feats.transpose(1, 2)  # (B, V, T, P, enc_dim) so a (B, V) camera mask selects whole views
-        out = feats.new_empty(*feats.shape[:-1], self.camera_tokens.shape[1])
-        for cam in camera.unique().tolist():
-            sel = camera == cam
-            out[sel] = self.adapters[cam](feats[sel]) + self.camera_tokens[cam]
-        out = out + self.embodiment_tokens[embodiment][:, None, None, None]
-        return out.transpose(1, 2)
+        # Each view gathers its camera's adapter weight instead of being routed with boolean masks: shapes stay
+        # static, so there is no host sync or recompilation per batch on TPU.
+        weight = torch.stack([a.weight for a in self.adapters])[camera]  # (B, V, dim, enc_dim)
+        out = torch.einsum("btvpe,bvde->btvpd", feats, weight) + self.camera_tokens[camera][:, None, :, None]
+        return out + self.embodiment_tokens[embodiment][:, None, None, None]
 
 
 @torch.no_grad()

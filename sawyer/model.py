@@ -69,11 +69,14 @@ class SawyerPredictor(nn.Module):
         self.init_weights()
 
     def compile_blocks(self):
-        """Fast training path: torch.compile each block (fuses norms, RoPE, view bias, SwiGLU) and switch the
-        block-causal mask to flex_attention, which only compiles efficiently inside torch.compile."""
-        self.use_flex = True
+        """Fast training path: torch.compile each block (fuses norms, RoPE, view bias, SwiGLU). Call after moving the
+        model to its device. On CUDA the block-causal mask switches to flex_attention, which only compiles efficiently
+        inside torch.compile. On TPU the blocks compile with TorchTPU's backend and keep SDPA with the boolean mask,
+        which it lowers to its flash-attention kernel (it would turn a flex BlockMask into the same dense mask)."""
+        device = next(self.parameters()).device.type
+        self.use_flex = device == "cuda"
         for blk in self.blocks:
-            blk.compile(dynamic=False)
+            blk.compile(backend="tpu" if device == "tpu" else "inductor", dynamic=False)
 
     @torch.no_grad()
     def init_weights(self):
