@@ -1,5 +1,6 @@
 """Frozen encoders: V-JEPA 2.1 ViT-L for camera frames, Qwen3-Embedding-0.6B for instructions."""
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -38,6 +39,24 @@ class FrozenVJEPA(nn.Module):
 
     def train(self, mode: bool = True):
         return super().train(False)  # frozen: never leave eval mode
+
+    def compile_encoder(self):
+        """torch.compile the ViT (fuses its per-layer RoPE, norms and MLP). The frame count is fixed per view count
+        (batch x steps x views), so dynamic=False compiles one graph for each.
+
+        The repo wraps every attention call in the deprecated torch.backends.cuda.sdp_kernel(), which dynamo can't
+        trace: it breaks the graph at each layer and runs past the recompile limit, leaving most layers eager. With no
+        arguments that context manager enables every backend, i.e. does nothing, so that call becomes a nullcontext
+        (calls with arguments still go to torch). fullgraph=True makes any remaining graph break an error."""
+        original = torch.backends.cuda.sdp_kernel
+        if not getattr(original, "_sawyer_noop_default", False):
+
+            def sdp_kernel(*args, **kwargs):
+                return contextlib.nullcontext() if not args and not kwargs else original(*args, **kwargs)
+
+            sdp_kernel._sawyer_noop_default = True
+            torch.backends.cuda.sdp_kernel = sdp_kernel
+        self.encoder.compile(dynamic=False, fullgraph=True)
 
     @torch.no_grad()
     def forward(self, frames: torch.Tensor) -> torch.Tensor:

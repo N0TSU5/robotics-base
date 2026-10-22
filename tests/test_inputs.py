@@ -35,6 +35,30 @@ def test_visual_input_routes_views_to_their_camera_adapter():
             torch.testing.assert_close(out[b, :, v], expected)
 
 
+def test_visual_input_gradients_match_per_camera_adapters():
+    torch.manual_seed(0)
+    vis = VisualInput(enc_dim=8, dim=16)
+    feats = torch.randn(2, 3, 2, 5, 8)
+    camera = torch.tensor([[CAMERAS["left"], CAMERAS["wrist"]], [CAMERAS["wrist"], CAMERAS["wrist"]]])  # repeated id
+    emb = torch.tensor([0, 7])
+    target = torch.randn(2, 3, 2, 5, 16)
+
+    def grads(forward):
+        vis.zero_grad()
+        (forward() - target).square().sum().backward()
+        return {n: p.grad.clone() for n, p in vis.named_parameters() if p.grad is not None}
+
+    def reference():
+        return torch.stack([torch.stack([vis.adapters[camera[b, v]](feats[b, :, v]) + vis.camera_tokens[camera[b, v]]
+                                         + vis.embodiment_tokens[emb[b]] for v in range(2)], 1) for b in range(2)])  # fmt: skip
+
+    ref, out = grads(reference), grads(lambda: vis(feats, camera, emb))
+    # Unused adapters get a zero gradient instead of None (the gather goes through a stack of all of them).
+    assert ref.keys() <= out.keys()
+    for name, g in out.items():
+        torch.testing.assert_close(g, ref.get(name, torch.zeros_like(g)), msg=name)
+
+
 @pytest.mark.skipif(not ROBOJEPA.exists(), reason="RoboJEPA checkpoint not downloaded")
 def test_load_robojepa_inputs_matches_checkpoint():
     enc, vis = StateEncoder(dim=1024), VisualInput(enc_dim=1024, dim=1024)

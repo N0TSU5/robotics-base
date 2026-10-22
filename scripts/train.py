@@ -41,7 +41,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--resume", default=None, help="checkpoint dir, or 'latest'")
     p.add_argument("--checkpoint-layers", type=int, default=None, help="blocks using activation checkpointing (default all)")
-    p.add_argument("--no-compile", action="store_true", help="eager blocks with SDPA (debugging)")
+    p.add_argument("--no-compile", action="store_true", help="eager blocks with SDPA and eager V-JEPA (debugging)")
     args = p.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # Trainer's loss lines show up live in log files
     logging.basicConfig(level=logging.INFO)
@@ -56,6 +56,7 @@ def main():
     model.cuda()
     if not args.no_compile:
         model.predictor.compile_blocks()
+        vjepa.compile_encoder()
     num_params = sum(p.numel() for p in model.parameters())
 
     seq_tokens = WINDOW_STEPS * (MAX_VIEWS * (args.image_size // 16) ** 2 + 1)
@@ -94,6 +95,8 @@ def main():
         dataloader_prefetch_factor=4,
         dataloader_persistent_workers=True,
         remove_unused_columns=False,
+        logging_nan_inf_filter=False,  # its isnan check syncs the GPU every micro-batch, only to filter the logged loss
+        accelerator_config={"non_blocking": True},  # async host-to-GPU copies (batches are already pinned)
         ignore_data_skip=True,  # don't re-read and discard every batch already trained on when resuming
         report_to="none",  # curves go to dashboard.png (DashboardCallback)
         seed=args.seed,

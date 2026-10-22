@@ -88,7 +88,7 @@ def test_wrapper_trains_predictor_only_and_keeps_encoders_frozen(tokenizer):
     assert vjepa.proj.weight.grad is None and qwen.emb.weight.grad is None
 
 
-def test_padded_views_are_not_encoded(tokenizer):
+def test_every_slot_is_encoded_in_one_call_and_padded_views_change_nothing(tokenizer):
     calls = []
 
     class Recording(FakeVJEPA):
@@ -96,12 +96,18 @@ def test_padded_views_are_not_encoded(tokenizer):
             calls.append(len(frames))
             return super().forward(frames)
 
-    model = SawyerForTraining(SawyerConfig(**SMALL), Recording(), FakeQwen(), image_size=32)
+    torch.manual_seed(0)
+    model = SawyerForTraining(SawyerConfig(**SMALL), Recording(), FakeQwen(), image_size=32).eval()
     rng = np.random.default_rng(0)
     batch = SawyerCollator(tokenizer)([_sample(rng), _sample(rng, n_views=1)])
     batch.pop("dataset")
-    model(**batch)
-    assert calls == [9 * 2 + 9 * 1]
+    ref = model(**batch)
+    assert calls == [2 * 9 * 2]  # fixed shape: padded slots included
+    noisy = {**batch, "frames": batch["frames"].clone()}
+    noisy["frames"][1, :, 1] = 255  # whatever sits in the padded slot is zeroed after encoding
+    out = model(**noisy)
+    for k in ref:
+        torch.testing.assert_close(out[k], ref[k])
 
 
 def test_weight_decay_groups():
@@ -136,6 +142,26 @@ def test_real_vjepa_normalizes_on_gpu_and_stays_frozen():
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         ref = vjepa.encoder(x.unsqueeze(2))
     torch.testing.assert_close(feats, ref)
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and Path(VJEPA_CKPT).exists()), reason="needs GPU and V-JEPA checkpoint")
+def test_compiled_vjepa_matches_eager():
+    from sawyer.encoders import FrozenVJEPA
+
+    vjepa = FrozenVJEPA().cuda()
+    frames = torch.randint(0, 255, (4, 224, 224, 3), dtype=torch.uint8, device="cuda")
+    with torch.no_grad():  # fp32 reference: eager and compiled bf16 both sit ~1.5% (relative) away from it
+        x = (frames.permute(0, 3, 1, 2).unsqueeze(2).float() / 255 - vjepa.mean) / vjepa.std
+        fp32 = vjepa.encoder(x).float()
+    eager = vjepa(frames)
+    vjepa.compile_encoder()  # fullgraph=True: raises if the encoder doesn't compile as one graph
+    compiled = vjepa(frames)
+
+    def rel(a):
+        return ((a.float() - fp32).norm() / fp32.norm()).item()
+
+    assert compiled.shape == eager.shape and compiled.dtype == eager.dtype
+    assert rel(compiled) <= 1.25 * rel(eager)  # fused kernels round differently, but no further from fp32
 
 
 def test_collator_drops_the_empty_view_slot_only_when_no_sample_uses_it(tokenizer):

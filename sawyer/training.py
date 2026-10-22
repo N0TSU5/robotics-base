@@ -56,10 +56,10 @@ class SawyerForTraining(nn.Module):
     def forward(self, frames, camera, view_valid, state, state_target, action_target, action_valid, embodiment,
                 input_ids, text_mask, has_text, action_zero=None):  # fmt: skip
         B, T, V = frames.shape[:3]
-        valid = view_valid[:, None].expand(B, T, V)
-        enc = self.vjepa(frames[valid])  # padded views are never encoded
-        feats = enc.new_zeros(B, T, V, *enc.shape[1:])
-        feats[valid] = enc
+        # Every slot is encoded: no boolean indexing (a GPU sync) and one encoder shape per view count. Training
+        # batches have no padded slots (WindowDataset groups by view count); padded eval slots are zeroed.
+        enc = self.vjepa(frames.flatten(0, 2)).unflatten(0, (B, T, V))
+        feats = torch.where(view_valid[:, None, :, None, None], enc, 0)
         text = self.qwen(input_ids, text_mask)
         outputs = self.predictor(feats, self.grid, camera, view_valid, state, embodiment, text, text_mask, has_text,
                                  state_now=state_target)  # fmt: skip
