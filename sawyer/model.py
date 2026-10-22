@@ -33,6 +33,7 @@ class SawyerConfig(PreTrainedConfig):
         text_dim: int = 1024,
         init_std: float = 0.02,
         grad_checkpointing: bool = True,
+        checkpoint_layers: int | None = None,
         loss_weights: dict | None = None,
         **kwargs,
     ):
@@ -45,6 +46,9 @@ class SawyerConfig(PreTrainedConfig):
         self.text_dim = text_dim
         self.init_std = init_std
         self.grad_checkpointing = grad_checkpointing
+        # How many blocks (from the first) recompute activations in backward; None = all. Fewer saves compute and
+        # costs ~40 KB of activation memory per token per block.
+        self.checkpoint_layers = checkpoint_layers
         self.loss_weights = loss_weights or {"visual": 1.0, "state": 1.0, "action": 1.0}
 
 
@@ -85,7 +89,10 @@ class SawyerPredictor(nn.Module):
         for blk in self.blocks:
             for out_proj in (blk.attn.proj, blk.cross.proj, blk.mlp.down):
                 nn.init.trunc_normal_(out_proj.weight, std=std / (3 * self.cfg.depth) ** 0.5)
-        nn.init.trunc_normal_(self.state_out, std=std)
+        # The visual and state heads predict the change from the current step and start at zero, so at init they
+        # equal the copy-frame / copy-state baselines and their losses only measure what is learned about change.
+        nn.init.zeros_(self.visual_out.weight)
+        nn.init.zeros_(self.state_out)
 
     def load_robojepa(self, path: str):
         """Copy RoboJEPA-300M's state encoder, camera tokens and robot tokens over the fresh init."""
@@ -124,8 +131,9 @@ class SawyerPredictor(nn.Module):
         rope = self.rope(pos)
         context, ctx_mask = self.text_in(text, text_mask, has_text)
 
-        for blk in self.blocks:
-            if self.cfg.grad_checkpointing and self.training:
+        n_ckpt = self.cfg.depth if self.cfg.checkpoint_layers is None else self.cfg.checkpoint_layers
+        for i, blk in enumerate(self.blocks):
+            if self.cfg.grad_checkpointing and self.training and i < n_ckpt:
                 x = checkpoint(blk, x, context, rope, camera_type, attn_mask, ctx_mask, use_reentrant=False)
             else:
                 x = blk(x, context, rope, camera_type, attn_mask, ctx_mask)
@@ -135,22 +143,24 @@ class SawyerPredictor(nn.Module):
         """(B, T, D) state-token outputs -> (B, T, ACTION_HORIZON, 7) relative delta actions starting at each step."""
         return self.action_head(h_state).unflatten(-1, (ACTION_HORIZON, ACTION_DIM))
 
-    def forward(self, feats, grid, camera, view_valid, state, embodiment, text, text_mask, has_text):
+    def forward(self, feats, grid, camera, view_valid, state, embodiment, text, text_mask, has_text, state_now):
         """Training pass.
 
         feats (B, T, V, P, enc_dim) V-JEPA patch features per step and view, P = grid[0] * grid[1]
         camera (B, V) RoboJEPA camera ids; view_valid (B, V) False for padded views
         state (B, T, 64) RoboJEPA raw state layout; embodiment (B,)
         text (B, L, text_dim) Qwen states; text_mask (B, L); has_text (B,)
+        state_now (B, T, 10) the current state in the state-target layout (xyz, 6D rotation, gripper)
 
-        Returns visual (B, T, V, P, enc_dim) and state (B, T, 10), where step t predicts step t + 1 (auxiliary), and
-        actions (B, T, ACTION_HORIZON, 7), where actions[:, t, k] goes from step t + k to t + k + 1.
+        Returns visual (B, T, V, P, enc_dim) and state (B, T, 10), where step t predicts step t + 1 as the current
+        step plus a predicted change (auxiliary), and actions (B, T, ACTION_HORIZON, 7), where actions[:, t, k]
+        goes from step t + k to t + k + 1.
         """
         B, T, V, P, _ = feats.shape
         h = self._trunk(feats, grid, camera, view_valid, state, embodiment, text, text_mask, has_text)
-        visual = self.visual_out(h[:, :, :-1]).view(B, T, V, P, -1)
+        visual = feats + self.visual_out(h[:, :, :-1]).view(B, T, V, P, -1)
         h_state = h[:, :, -1]
-        state_next = torch.einsum("btd,bdk->btk", h_state, self.state_out[embodiment])
+        state_next = state_now + torch.einsum("btd,bdk->btk", h_state, self.state_out[embodiment])
         return visual, state_next, self._action_chunk(h_state)
 
     @torch.no_grad()

@@ -160,6 +160,7 @@ def test_flex_attention_path_matches_sdpa():
         view_valid=torch.tensor([[True, True], [True, False]], device="cuda"), state=torch.randn(B, T, 64, device="cuda"),
         embodiment=torch.tensor([0, 26], device="cuda"), text=torch.randn(B, 5, 48, device="cuda"),
         text_mask=torch.ones(B, 5, dtype=torch.bool, device="cuda"), has_text=torch.tensor([True, False], device="cuda"),
+        state_now=torch.randn(B, T, 10, device="cuda"),
     )  # fmt: skip
     with torch.no_grad():
         ref = model(**batch)
@@ -183,6 +184,7 @@ def test_flex_attention_path_matches_sdpa_gradients():
         view_valid=torch.tensor([[True, True], [True, False]], device="cuda"), state=torch.randn(B, T, 64, device="cuda"),
         embodiment=torch.tensor([0, 26], device="cuda"), text=torch.randn(B, 5, 48, device="cuda"),
         text_mask=torch.ones(B, 5, dtype=torch.bool, device="cuda"), has_text=torch.tensor([True, False], device="cuda"),
+        state_now=torch.randn(B, T, 10, device="cuda"),
     )  # fmt: skip
 
     def grads():

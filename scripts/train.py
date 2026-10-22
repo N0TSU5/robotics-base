@@ -34,11 +34,13 @@ def main():
     p.add_argument("--image-size", type=int, default=224)
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--cache-gb", type=float, default=30)
-    p.add_argument("--save-steps", type=int, default=250, help="checkpoint + validation every N steps (~50 min)")
-    p.add_argument("--val-windows", type=int, default=64, help="held-out windows per dataset")
-    p.add_argument("--logging-steps", type=int, default=10)
+    p.add_argument("--save-steps", type=int, default=250, help="checkpoint every N steps (~55 min)")
+    p.add_argument("--eval-steps", type=int, default=100, help="validation every N steps (~22 min)")
+    p.add_argument("--val-windows", type=int, default=32, help="held-out windows per dataset")
+    p.add_argument("--logging-steps", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--resume", default=None, help="checkpoint dir, or 'latest'")
+    p.add_argument("--checkpoint-layers", type=int, default=None, help="blocks using activation checkpointing (default all)")
     p.add_argument("--no-compile", action="store_true", help="eager blocks with SDPA (debugging)")
     args = p.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # Trainer's loss lines show up live in log files
@@ -49,7 +51,7 @@ def main():
     resume_step = int(resume.rsplit("-", 1)[1]) if resume else 0
 
     vjepa, qwen = FrozenVJEPA().cuda(), FrozenQwen().cuda()
-    model = SawyerForTraining(SawyerConfig(), vjepa, qwen, args.image_size)
+    model = SawyerForTraining(SawyerConfig(checkpoint_layers=args.checkpoint_layers), vjepa, qwen, args.image_size)
     model.predictor.load_robojepa(ROBOJEPA_CKPT)
     model.cuda()
     if not args.no_compile:
@@ -77,7 +79,7 @@ def main():
         per_device_train_batch_size=args.batch,
         per_device_eval_batch_size=args.batch,
         eval_strategy="steps",
-        eval_steps=args.save_steps,
+        eval_steps=args.eval_steps,
         gradient_accumulation_steps=args.accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine_with_min_lr",

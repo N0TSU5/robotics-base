@@ -61,7 +61,8 @@ class SawyerForTraining(nn.Module):
         feats = enc.new_zeros(B, T, V, *enc.shape[1:])
         feats[valid] = enc
         text = self.qwen(input_ids, text_mask)
-        outputs = self.predictor(feats, self.grid, camera, view_valid, state, embodiment, text, text_mask, has_text)
+        outputs = self.predictor(feats, self.grid, camera, view_valid, state, embodiment, text, text_mask, has_text,
+                                 state_now=state_target)  # fmt: skip
         losses = sawyer_loss(outputs, feats, view_valid, state_target, action_target, action_valid,
                              self.predictor.cfg.loss_weights)  # fmt: skip
         if not self.training and action_zero is not None:

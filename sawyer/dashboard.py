@@ -1,14 +1,13 @@
 """Training dashboard: a PNG of the training curves, redrawn at every log, viewable without a TensorBoard server."""
 
 import os
+import threading
+import time
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-from matplotlib.ticker import FuncFormatter  # noqa: E402
-from transformers import TrainerCallback  # noqa: E402
+import numpy as np
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
+from transformers import TrainerCallback
 
 PANELS = [
     ("loss", "Total loss", True),
@@ -102,7 +101,9 @@ def render(history: list[dict], max_steps: int, seq_per_step: int, path: str) ->
     if not rows:
         return
     evals = [h for h in history if "eval_loss" in h]
-    fig, axes = plt.subplots(3, 4, figsize=(16, 11), facecolor=SURFACE, layout="constrained")
+    # Figure API, not pyplot: safe to render from the callback's background thread.
+    fig = Figure(figsize=(16, 11), facecolor=SURFACE, layout="constrained")
+    axes = fig.subplots(3, 4)
     for ax, (metric, baseline, title) in zip(axes[2], VAL_PANELS):
         _validation_panel(ax, evals, metric, baseline, title)
     for ax, (key, title, log_y) in zip(axes[:2].flat, PANELS):
@@ -130,15 +131,27 @@ def render(history: list[dict], max_steps: int, seq_per_step: int, path: str) ->
     fig.suptitle("Sawyer pretraining", x=0.01, ha="left", color=INK, fontsize=13, weight="bold")
     tmp = f"{path}.tmp.png"
     fig.savefig(tmp, dpi=100, facecolor=SURFACE)
-    plt.close(fig)
     os.replace(tmp, path)  # viewers never see a half-written image
 
 
 class DashboardCallback(TrainerCallback):
-    def __init__(self, path: str, seq_per_step: int):
+    """Redraws the dashboard after a log, at most every min_interval seconds, in a background thread so drawing
+    never stalls training. Validation results are always drawn as soon as they are logged."""
+
+    def __init__(self, path: str, seq_per_step: int, min_interval: float = 30.0):
         self.path = path
         self.seq_per_step = seq_per_step
+        self.min_interval = min_interval
+        self._last = 0.0
+        self._thread = None
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if state.is_world_process_zero:
-            render(state.log_history, state.max_steps, self.seq_per_step, self.path)
+        if not state.is_world_process_zero or (self._thread is not None and self._thread.is_alive()):
+            return
+        is_eval = logs is not None and "eval_loss" in logs
+        if not is_eval and time.time() - self._last < self.min_interval:
+            return
+        self._last = time.time()
+        history = [dict(h) for h in state.log_history]  # snapshot: training keeps appending
+        self._thread = threading.Thread(target=render, args=(history, state.max_steps, self.seq_per_step, self.path), daemon=True)
+        self._thread.start()

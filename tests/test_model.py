@@ -22,6 +22,7 @@ def _batch(B=2, T=3, V=2, grid=(2, 3), L=4, enc_dim=32, text_dim=48):
         text=torch.randn(B, L, text_dim),
         text_mask=torch.ones(B, L, dtype=torch.bool),
         has_text=torch.tensor([True, False])[:B],
+        state_now=torch.randn(B, T, 10),
     )
 
 
@@ -36,9 +37,10 @@ def test_predict_actions_is_one_pass_from_the_latest_step():
     model = SawyerPredictor(SawyerConfig(**SMALL)).eval()
     batch = _batch()
     _, _, chunks = model(**batch)
-    first = {**batch, "feats": batch["feats"][:, :1], "state": batch["state"][:, :1]}  # deployment: only step 0
+    obs = {k: v for k, v in batch.items() if k != "state_now"}  # deployment has no training targets
+    first = {**obs, "feats": obs["feats"][:, :1], "state": obs["state"][:, :1]}  # deployment: only step 0
     torch.testing.assert_close(model.predict_actions(**first), chunks[:, 0])
-    torch.testing.assert_close(model.predict_actions(**batch), chunks[:, -1])
+    torch.testing.assert_close(model.predict_actions(**obs), chunks[:, -1])
     assert model.predict_actions(**first).shape == (2, 8, 7)
 
 
@@ -59,6 +61,14 @@ def test_same_type_cameras_get_distinct_positions():
     _, pos, camera_type, _ = model._assemble(b["feats"], b["grid"], b["camera"], b["view_valid"], b["state"], b["embodiment"])
     patches = pos[0][camera_type[0] != 0]
     assert len(torch.unique(patches, dim=0)) == len(patches)  # every patch has its own (t, row, col, view)
+
+
+def test_visual_and_state_heads_start_as_copy_baselines():
+    model = SawyerPredictor(SawyerConfig(**SMALL)).eval()
+    batch = _batch()
+    visual, state, _ = model(**batch)
+    torch.testing.assert_close(visual, batch["feats"])  # next frame predicted = this frame
+    torch.testing.assert_close(state, batch["state_now"])  # next state predicted = this state
 
 
 def test_no_leak_from_future_steps():
