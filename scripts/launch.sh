@@ -12,6 +12,8 @@ cd "$(dirname "$0")/.."
 OUT=${1:-runs/sawyer}
 shift || true
 MAX_RESTARTS=${MAX_RESTARTS:-20}
+# The run sits a few GB under the 48 GB limit; expandable segments stop fragmentation from turning that into an OOM.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 mkdir -p "$OUT"
 echo $$ > "$OUT/launcher.pid"
 
