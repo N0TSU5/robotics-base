@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModel, AutoTokenizer
 
@@ -13,6 +14,14 @@ VJEPA_CKPT = ROOT / "checkpoints/vjepa2_1/vjepa2_1_vitl_dist_vitG_384.pt"
 QWEN_DIR = ROOT / "checkpoints/qwen3-embedding-0.6b"
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+class Fp32LayerNorm(nn.LayerNorm):
+    """LayerNorm computed in fp32, which is what CUDA autocast does with layer_norm. TorchTPU's autocast leaves it in
+    the input dtype, and its kernel fails on a bf16 input with fp32 weights."""
+
+    def forward(self, x):
+        return F.layer_norm(x.float(), self.normalized_shape, self.weight, self.bias, self.eps)
 
 
 class FrozenVJEPA(nn.Module):
@@ -31,6 +40,9 @@ class FrozenVJEPA(nn.Module):
         )  # fmt: skip
         state = torch.load(path, map_location="cpu", weights_only=True)["ema_encoder"]
         self.encoder.load_state_dict(_clean_backbone_key(state), strict=True)
+        for m in self.encoder.modules():
+            if type(m) is nn.LayerNorm:
+                m.__class__ = Fp32LayerNorm
         self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False)
         self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
         self.requires_grad_(False)
