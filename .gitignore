@@ -1,0 +1,23 @@
+# Environment and build
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Model weights (V-JEPA 2.1, Qwen3-Embedding, RoboJEPA): downloaded, not versioned
+checkpoints/
+
+# Training outputs and logs
+runs/
+*.log
+
+# Data caches, rebuilt on demand
+data/cache/
+data/val_cache/
+data/stats_cache/
+data/meta/**/.cache/
+data/meta/**/episodes.jsonl
+
+# Large metadata copies in the test fixtures (tests only read the parquet/mp4 files)
+sample_data/**/episodes.jsonl
+sample_data/**/tasks.jsonl
