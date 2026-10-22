@@ -41,7 +41,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--resume", default=None, help="checkpoint dir, or 'latest'")
     p.add_argument("--checkpoint-layers", type=int, default=None, help="blocks using activation checkpointing (default all)")
-    p.add_argument("--compile-mode", default=None, help="torch.compile mode for the predictor blocks, e.g. max-autotune-no-cudagraphs")
+    p.add_argument("--compile-mode", default="max-autotune-no-cudagraphs",
+                   help="torch.compile mode for the predictor blocks (autotuned: 6%% faster on the L40S, ~4 min extra compile per shape, cached)")
     p.add_argument("--no-compile", action="store_true", help="eager blocks with SDPA and eager V-JEPA (debugging)")
     args = p.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # Trainer's loss lines show up live in log files
