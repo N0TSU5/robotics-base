@@ -40,20 +40,20 @@ DATASETS = [
         "observation.images.exterior_image_1_left": "left",
         "observation.images.exterior_image_2_left": "right",
         "observation.images.wrist_image_left": "wrist",
-    }, weight=0.55),
+    }, weight=0.56),
     DatasetConfig("bridge", "IPEC-COMMUNITY/bridge_orig_lerobot", "bridge", {
         "observation.images.image_0": "right",  # over-the-shoulder, RoboJEPA's "right_back"
         "observation.images.image_1": "side",  # image_1..3 are all-black placeholders when not recorded
         "observation.images.image_2": "side",
         "observation.images.image_3": "wrist",
-    }, weight=0.30, placeholder_views=True),
+    }, weight=0.36, placeholder_views=True),
     DatasetConfig("ur5", "IPEC-COMMUNITY/berkeley_autolab_ur5_lerobot", "ur5", {
         "observation.images.image": "front",
         "observation.images.hand_image": "wrist",
-    }, weight=0.07),
+    }, weight=0.03),
     DatasetConfig("kuka", "IPEC-COMMUNITY/kuka_lerobot", "kuka", {
         "observation.images.image": "left",
-    }, weight=0.08),
+    }, weight=0.05),
 ]  # fmt: skip
 
 

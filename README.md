@@ -100,10 +100,10 @@ Nothing needs to be downloaded in advance. Training streams these LeRobot-format
 
 | Dataset | Hub repo | Robot | Share of samples |
 |---|---|---|---|
-| DROID | `IPEC-COMMUNITY/droid_lerobot` | Franka | 0.55 |
-| Bridge | `IPEC-COMMUNITY/bridge_orig_lerobot` | WidowX | 0.30 |
-| kuka | `IPEC-COMMUNITY/kuka_lerobot` | Kuka iiwa | 0.08 |
-| UR5 | `IPEC-COMMUNITY/berkeley_autolab_ur5_lerobot` | UR5 | 0.07 |
+| DROID | `IPEC-COMMUNITY/droid_lerobot` | Franka | 0.56 |
+| Bridge | `IPEC-COMMUNITY/bridge_orig_lerobot` | WidowX | 0.36 |
+| kuka | `IPEC-COMMUNITY/kuka_lerobot` | Kuka iiwa | 0.05 |
+| UR5 | `IPEC-COMMUNITY/berkeley_autolab_ur5_lerobot` | UR5 | 0.03 |
 
 On first use, each dataset's episode list (`meta/episodes.jsonl`, ~5 MB in total) is downloaded to `data/meta/`.
 Episode files go to an LRU cache in `data/cache/`, capped by `--cache-gb`. The fixed validation episodes use a
