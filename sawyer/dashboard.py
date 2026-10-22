@@ -7,6 +7,7 @@ import time
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
+from scipy.signal import lfilter
 from transformers import TrainerCallback
 
 PANELS = [
@@ -34,11 +35,12 @@ def smooth(values: np.ndarray) -> np.ndarray:
     """Debiased EMA spanning ~5% of the points (at most 50 logs), so short runs are barely smoothed and the
     trend never lags behind from a cold start."""
     beta = 1 - 1 / np.clip(len(values) / 20, 1, 50)
-    out, acc = np.empty_like(values), 0.0
-    for i, v in enumerate(values):
-        acc = beta * acc + (1 - beta) * v
-        out[i] = acc / (1 - beta ** (i + 1)) if beta > 0 else v
-    return out
+    if beta == 0:
+        return values.copy()
+    # acc[i] = beta * acc[i - 1] + (1 - beta) * values[i], as one filter call: rendering runs in a thread that shares
+    # the GIL with the training loop, and the history reaches ~60k points per panel.
+    acc = lfilter([1 - beta], [1, -beta], values)
+    return acc / (1 - beta ** np.arange(1, len(values) + 1))
 
 
 def _status(rows: list[dict], max_steps: int, seq_per_step: int) -> str:

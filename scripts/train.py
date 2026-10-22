@@ -35,12 +35,13 @@ def main():
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--cache-gb", type=float, default=30)
     p.add_argument("--save-steps", type=int, default=250, help="checkpoint every N steps (~55 min)")
-    p.add_argument("--eval-steps", type=int, default=100, help="validation every N steps (~22 min)")
+    p.add_argument("--eval-steps", type=int, default=250, help="validation every N steps (~45 min)")
     p.add_argument("--val-windows", type=int, default=32, help="held-out windows per dataset")
     p.add_argument("--logging-steps", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--resume", default=None, help="checkpoint dir, or 'latest'")
     p.add_argument("--checkpoint-layers", type=int, default=None, help="blocks using activation checkpointing (default all)")
+    p.add_argument("--compile-mode", default=None, help="torch.compile mode for the predictor blocks, e.g. max-autotune-no-cudagraphs")
     p.add_argument("--no-compile", action="store_true", help="eager blocks with SDPA and eager V-JEPA (debugging)")
     args = p.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # Trainer's loss lines show up live in log files
@@ -55,7 +56,7 @@ def main():
     model.predictor.load_robojepa(ROBOJEPA_CKPT)
     model.cuda()
     if not args.no_compile:
-        model.predictor.compile_blocks()
+        model.predictor.compile_blocks(args.compile_mode)
         vjepa.compile_encoder()
     num_params = sum(p.numel() for p in model.parameters())
 

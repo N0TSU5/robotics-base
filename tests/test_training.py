@@ -63,7 +63,7 @@ def test_collator_pads_text_on_the_right(tokenizer):
     rng = np.random.default_rng(0)
     batch = SawyerCollator(tokenizer)([_sample(rng), _sample(rng, n_views=1)])
     assert batch["frames"].shape == (2, 9, 2, 32, 32, 3) and batch["frames"].dtype == torch.uint8
-    assert batch["input_ids"].shape == (2, 64)  # fixed length for the compiled blocks
+    assert batch["input_ids"].shape == (2, 63)  # fixed length for the compiled blocks (64 keys with the null token)
     n = int(batch["text_mask"][0].sum())
     assert batch["text_mask"][0, :n].all() and not batch["text_mask"][0, n:].any()  # right padding
     assert batch["text_mask"][1, 0] and not batch["text_mask"][1, 1:].any()  # "" -> one EOS, then padding

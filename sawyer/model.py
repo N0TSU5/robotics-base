@@ -72,12 +72,13 @@ class SawyerPredictor(nn.Module):
         self.use_flex = False
         self.init_weights()
 
-    def compile_blocks(self):
+    def compile_blocks(self, mode: str | None = None):
         """Fast training path: torch.compile each block (fuses norms, RoPE, view bias, SwiGLU) and switch the
-        block-causal mask to flex_attention, which only compiles efficiently inside torch.compile."""
+        block-causal mask to flex_attention, which only compiles efficiently inside torch.compile. mode is
+        torch.compile's (e.g. "max-autotune-no-cudagraphs" also tunes the flex_attention and matmul tiles)."""
         self.use_flex = True
         for blk in self.blocks:
-            blk.compile(dynamic=False)
+            blk.compile(dynamic=False, mode=mode)
 
     @torch.no_grad()
     def init_weights(self):

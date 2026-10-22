@@ -7,6 +7,9 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex
 
 from sawyer.rope import apply_rope
 
+# Compiled, create_block_mask evaluates mask_mod per tile instead of materializing the dense (B, N, N) mask eagerly.
+_create_block_mask = torch.compile(create_block_mask)
+
 
 def block_causal_mask(timestep: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
     """timestep (B, N) int, valid (B, N) bool -> (B, 1, N, N) bool, True = may attend.
@@ -26,7 +29,7 @@ def block_causal_block_mask(timestep: torch.Tensor, valid: torch.Tensor) -> Bloc
         return (timestep[b, q] >= timestep[b, kv]) & valid[b, kv]
 
     B, N = timestep.shape
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=timestep.device)
+    return _create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=timestep.device)
 
 
 class SelfAttention(nn.Module):

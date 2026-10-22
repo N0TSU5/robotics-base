@@ -18,7 +18,7 @@ NO_DECAY_SUFFIXES = ("view_embed.weight", "view_gate")
 
 
 class SawyerCollator:
-    def __init__(self, tokenizer, max_text_tokens: int = 64):
+    def __init__(self, tokenizer, max_text_tokens: int = 63):  # + the null token = 64 cross-attn keys, a multiple of 8
         self.tokenizer = tokenizer
         self.max_text_tokens = max_text_tokens
 
