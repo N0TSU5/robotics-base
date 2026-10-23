@@ -141,6 +141,8 @@ class WindowDataset(IterableDataset):
                         raise RuntimeError(f"{failures} consecutive windows failed") from e
                     break
                 failures = 0
+                if not by_name[first.dataset].config.train_actions:
+                    sample["action_valid"] = np.zeros_like(sample["action_valid"])
                 yield sample
 
     def __iter__(self):

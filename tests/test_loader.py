@@ -10,7 +10,7 @@ import pytest
 from sawyer.data import loader as loader_mod
 from sawyer.data.hub import HubCache
 from sawyer.data.index import DATASETS, EpisodeIndex, Window
-from sawyer.data.loader import WindowDataset, WindowLoader, decode_frames
+from sawyer.data.loader import FixedWindows, WindowDataset, WindowLoader, decode_frames
 from sawyer.data.normalize import ActionStats
 from sawyer.data.robot_state import STATE_SPECS, to_actions, to_pose7
 from sawyer.inputs import CAMERAS, EMBODIMENTS
@@ -173,3 +173,20 @@ def test_episode_reuse_draws_extra_windows_from_the_same_episode(monkeypatch):
         assert len({w.episode for w in run}) == 1 and all(0 <= w.start <= 40 - 9 for w in run)
     # the shuffle buffer breaks up the runs in what training sees
     assert sum(a == b for a, b in zip(out, out[1:])) < 0.5 * len(out)
+
+
+def test_kuka_actions_are_masked_in_training_only(monkeypatch):
+    def fake(self, window, rng):
+        return {"view_valid": np.array([True, False]), "action_valid": np.ones((9, 8), bool), "dataset": window.dataset}
+
+    monkeypatch.setattr(loader_mod.WindowLoader, "load", fake)
+    eps = [{"episode_index": 0, "length": 20, "tasks": ["x"]}]
+    kuka, ur5 = EpisodeIndex(CONFIGS["kuka"], {"fps": 5}, eps), EpisodeIndex(CONFIGS["ur5"], {"fps": 5}, eps)
+    assert not CONFIGS["kuka"].train_actions and CONFIGS["ur5"].train_actions
+    stream = iter(WindowDataset([kuka, ur5], STATS, "/nonexistent", 1e9))
+    samples = [next(stream) for _ in range(200)]
+    for s in samples:
+        assert s["action_valid"].any() == (s["dataset"] != "kuka")
+    assert {s["dataset"] for s in samples} == {"kuka", "ur5"}
+    window = Window("kuka", 0, 0, kuka.stride, "x", True)
+    assert FixedWindows([kuka], STATS, [window], "/nonexistent", 1e9)[0]["action_valid"].all()  # validation keeps them

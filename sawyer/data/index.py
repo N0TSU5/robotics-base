@@ -33,6 +33,9 @@ class DatasetConfig:
     cameras: dict[str, str]  # video feature key -> inputs.CAMERAS name
     weight: float  # share of sampled windows
     placeholder_views: bool = False  # unrecorded cameras stored as all-black videos: fetch all, then pick
+    # False: in training the dataset contributes visual and state losses but no action loss (validation still reports
+    # it). For data whose actions are not learnable from observations, e.g. kuka's RL-exploration motions.
+    train_actions: bool = True
 
 
 DATASETS = [
@@ -53,7 +56,7 @@ DATASETS = [
     }, weight=0.03),
     DatasetConfig("kuka", "IPEC-COMMUNITY/kuka_lerobot", "kuka", {
         "observation.images.image": "left",
-    }, weight=0.05),
+    }, weight=0.05, train_actions=False),  # QT-Opt exploration: step-to-step action correlation ~0
 ]  # fmt: skip
 
 
