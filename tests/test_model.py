@@ -109,7 +109,7 @@ def test_loss_backprops_into_copied_inputs():
     action_valid[:, 2, 6:] = False  # last step's chunk runs past the episode end
     losses = sawyer_loss(out, batch["feats"], batch["view_valid"], torch.randn(2, 3, 10), torch.randn(2, 3, 8, 7),
                          action_valid, model.cfg.loss_weights)  # fmt: skip
-    assert all(torch.isfinite(v) for v in losses.values())
+    assert all(torch.isfinite(v).all() for v in losses.values())
     losses["loss"].backward()
     assert model.state_in.weight.grad[[0, 10]].abs().sum() > 0  # only the two robots in the batch
     assert model.state_in.weight.grad[1].abs().sum() == 0

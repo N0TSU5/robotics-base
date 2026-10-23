@@ -54,6 +54,7 @@ def test_ur5_sample_layout_and_targets(tmp_path):
     assert s["embodiment"] == EMBODIMENTS.index("ur5")
     assert s["state"].shape == (9, 64) and s["state_target"].shape == (9, 10)
     assert s["action_valid"].all()
+    np.testing.assert_array_equal(s["state_scale"], STATS["ur5"].state_scale_array())
 
     raw = pq.read_table(SAMPLES / "berkeley_autolab_ur5_lerobot/episode_000002.parquet").column("observation.state")
     raw = np.stack(raw.to_pylist())

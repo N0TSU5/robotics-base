@@ -49,7 +49,11 @@ class SawyerConfig(PreTrainedConfig):
         # How many blocks (from the first) recompute activations in backward; None = all. Fewer saves compute and
         # costs ~40 KB of activation memory per token per block.
         self.checkpoint_layers = checkpoint_layers
-        self.loss_weights = loss_weights or {"visual": 1.0, "state": 1.0, "action": 1.0}
+        # The state loss is measured in units of each dataset's typical state change (~0.003-0.05). An L1 gradient has
+        # size weight / scale, so the weight is set near the typical scale (0.01): the state branch's gradient keeps
+        # its unscaled overall size, and only its balance shifts toward slow robots. A larger weight lets it dominate
+        # the global gradient norm, and clipping then shrinks every other update (weight 0.2 gave grad norm ~30).
+        self.loss_weights = loss_weights or {"visual": 1.0, "state": 0.01, "action": 1.0}
 
 
 class SawyerPredictor(nn.Module):
@@ -172,20 +176,30 @@ class SawyerPredictor(nn.Module):
         return self._action_chunk(h[:, -1:, -1])[:, 0]
 
 
-def sawyer_loss(outputs, feats, view_valid, state_target, action_target, action_valid, weights):
+def sawyer_loss(outputs, feats, view_valid, state_target, action_target, action_valid, weights, state_scale=None):
     """Teacher-forced L1 losses.
 
     state_target (B, T, 10); action_target (B, T, ACTION_HORIZON, 7), normalized per dataset;
-    action_valid (B, T, ACTION_HORIZON) False where the chunk runs past the end of the episode.
+    action_valid (B, T, ACTION_HORIZON) False where the chunk runs past the end of the episode;
+    state_scale (B, 10) per-dataset typical state change: state errors are measured in units of it.
+
+    Keys starting with "_" hold per-sample sums for per-dataset logging and are not part of the loss.
     """
     visual, state_next, actions = outputs
     err = (visual[:, :-1].float() - feats[:, 1:].float()).abs().mean(-1)  # (B, T - 1, V, P)
     mask = view_valid[:, None, :, None].expand_as(err)
+    state_err = (state_next[:, :-1].float() - state_target[:, 1:].float()).abs()  # (B, T - 1, 10)
+    if state_scale is not None:
+        state_err = state_err / state_scale[:, None].float()
     act_err = (actions.float() - action_target.float()).abs().mean(-1) * action_valid
     losses = {
         "visual": (err * mask).sum() / mask.sum(),
-        "state": F.l1_loss(state_next[:, :-1].float(), state_target[:, 1:].float()),
+        "state": state_err.mean(),
         "action": act_err.sum() / action_valid.sum().clamp(min=1),
+        "_visual_sum": (err * mask).flatten(1).sum(1),
+        "_visual_count": mask.flatten(1).sum(1).float(),
+        "_action_sum": act_err.flatten(1).sum(1),
+        "_action_count": action_valid.flatten(1).sum(1).float(),
     }
     losses["loss"] = sum(weights[k] * losses[k] for k in weights)
     return losses

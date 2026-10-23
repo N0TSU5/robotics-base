@@ -5,10 +5,13 @@ import threading
 import time
 
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 from scipy.signal import lfilter
 from transformers import TrainerCallback
+
+from sawyer.updates import COMPONENT_ROWS, GROUPS
 
 PANELS = [
     ("loss", "Total loss", True),
@@ -29,6 +32,12 @@ VAL_PANELS = [
     (lambda d: f"eval_{d}_visual", lambda d: f"eval_{d}_visual_copy", "Validation visual ÷ copy-frame baseline"),
     (lambda d: f"eval_{d}_state", lambda d: f"eval_{d}_state_copy", "Validation state ÷ copy-state baseline"),
 ]  # (metric, baseline it is divided by, title)
+# Component groups in the update-size chart: categorical slots 5-8, so they never share a hue with a dataset.
+GROUP_COLORS = dict(zip(GROUPS, ["#e87ba4", "#008300", "#6250d6", "#e34948"]))
+# Sequential blue ramp (light = small update, dark = large) for the heatmap.
+UPDATE_CMAP = LinearSegmentedColormap.from_list(
+    "updates", ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+)
 
 
 def smooth(values: np.ndarray) -> np.ndarray:
@@ -98,16 +107,97 @@ def _validation_panel(ax, evals: list[dict], metric, baseline, title: str) -> No
     ax.legend(loc="best", fontsize=8, frameon=False, labelcolor=INK_2)
 
 
-def render(history: list[dict], max_steps: int, seq_per_step: int, path: str) -> None:
+def _dataset_panel(ax, rows: list[dict], value, title: str, reference: float | None = None, smoothed: bool = False):
+    """One line per dataset (fixed colors, labelled at the line end). value(row, dataset) -> float or None."""
+    _style(ax, title)
+    drawn = False
+    for name, color in DATASET_COLORS.items():
+        pts = [(h["step"], v) for h in rows if (v := value(h, name)) is not None]
+        if not pts:
+            continue
+        pts = np.array(pts, dtype=float)
+        if smoothed:
+            ax.plot(pts[:, 0], smooth(pts[:, 1]), color=color, linewidth=2, label=name)
+        else:
+            ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=2, marker="o", markersize=4, label=name)
+        end = (pts[-1, 0], smooth(pts[:, 1])[-1] if smoothed else pts[-1, 1])
+        ax.annotate(name, end, xytext=(4, 0), textcoords="offset points", va="center", color=INK_2, fontsize=8)
+        drawn = True
+    if not drawn:
+        _empty(ax)
+        return
+    if reference is not None:
+        ax.axhline(reference, color=MUTED, linestyle="--", linewidth=1)
+    ax.legend(loc="best", fontsize=8, frameon=False, labelcolor=INK_2)
+
+
+def _update_groups_panel(ax, updates: list[dict]) -> None:
+    _style(ax, "Weight update per step, ‖Δw‖ / ‖w‖")
+    if not updates:
+        _empty(ax)
+        return
+    for group, color in GROUP_COLORS.items():
+        pts = np.array([(r["step"], r["groups"][group]) for r in updates if group in r.get("groups", {})], dtype=float)
+        if len(pts) == 0:
+            continue
+        ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=2, label=group)
+        ax.annotate(group, pts[-1], xytext=(4, 0), textcoords="offset points", va="center", color=INK_2, fontsize=8)
+    ax.set_yscale("log")
+    ax.legend(loc="best", fontsize=8, frameon=False, labelcolor=INK_2)
+
+
+def _update_heatmap(ax, updates: list[dict]) -> None:
+    """Latest relative update for every block x component: which layers and parts are learning the most right now."""
+    if not updates or "blocks" not in updates[-1]:
+        _style(ax, "Relative weight update per block and component")
+        _empty(ax)
+        return
+    latest = updates[-1]
+    grid = np.array([latest["blocks"][c] for c in COMPONENT_ROWS], dtype=float)
+    grid = np.ma.masked_invalid(np.where(grid > 0, grid, np.nan))
+    ax.set_facecolor(SURFACE)
+    ax.set_title(f"Relative weight update per block and component (‖Δw‖ / ‖w‖ per step, at step {latest['step']:,}); "
+                 "darker = changing faster", loc="left", color=INK, fontsize=10)  # fmt: skip
+    if grid.count() == 0:
+        _empty(ax)
+        return
+    image = ax.imshow(grid, aspect="auto", cmap=UPDATE_CMAP, norm=LogNorm(vmin=grid.min(), vmax=grid.max()),
+                      interpolation="nearest")  # fmt: skip
+    ax.set_yticks(range(len(COMPONENT_ROWS)), COMPONENT_ROWS)
+    ax.set_xticks(range(grid.shape[1]), [str(i) for i in range(grid.shape[1])])
+    ax.set_xlabel("block (0 = closest to the inputs)", color=MUTED, fontsize=8)
+    ax.tick_params(colors=MUTED, labelsize=8, length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    bar = ax.figure.colorbar(image, ax=ax, fraction=0.02, pad=0.01)
+    bar.ax.tick_params(colors=MUTED, labelsize=8)
+    bar.outline.set_visible(False)
+
+
+def _mean_pose_corr(h: dict, name: str) -> float | None:
+    xyz, rot = h.get(f"eval_{name}_corr_xyz"), h.get(f"eval_{name}_corr_rot")
+    return None if xyz is None or rot is None else (xyz + rot) / 2
+
+
+def render(history: list[dict], max_steps: int, seq_per_step: int, path: str, updates: list[dict] | None = None) -> None:
     rows = [h for h in history if "loss" in h and "step" in h]
     if not rows:
         return
     evals = [h for h in history if "eval_loss" in h]
     # Figure API, not pyplot: safe to render from the callback's background thread.
-    fig = Figure(figsize=(16, 11), facecolor=SURFACE, layout="constrained")
-    axes = fig.subplots(3, 4)
+    fig = Figure(figsize=(16, 19), facecolor=SURFACE, layout="constrained")
+    grid = fig.add_gridspec(5, 4, height_ratios=[1, 1, 1, 1, 0.9])
+    axes = np.array([[fig.add_subplot(grid[r, c]) for c in range(4)] for r in range(4)])
     for ax, (metric, baseline, title) in zip(axes[2], VAL_PANELS):
         _validation_panel(ax, evals, metric, baseline, title)
+    _dataset_panel(axes[3, 0], rows, lambda h, d: h.get(f"train_{d}_action"), "Train action loss by dataset",
+                   smoothed=True)  # fmt: skip
+    _dataset_panel(axes[3, 1], evals, _mean_pose_corr, "Val action correlation (6 pose axes)",
+                   reference=0.0)  # fmt: skip
+    _dataset_panel(axes[3, 2], evals, lambda h, d: h.get(f"eval_{d}_spread"),
+                   "Val prediction spread ÷ true (1 = unshrunk)", reference=1.0)  # fmt: skip
+    _update_groups_panel(axes[3, 3], updates or [])
+    _update_heatmap(fig.add_subplot(grid[4, :]), updates or [])
     for ax, (key, title, log_y) in zip(axes[:2].flat, PANELS):
         pts = np.array([(h["step"], h[key]) for h in rows if key in h], dtype=float)
         _style(ax, title)
@@ -140,10 +230,11 @@ class DashboardCallback(TrainerCallback):
     """Redraws the dashboard after a log, at most every min_interval seconds, in a background thread so drawing
     never stalls training. Validation results are always drawn as soon as they are logged."""
 
-    def __init__(self, path: str, seq_per_step: int, min_interval: float = 30.0):
+    def __init__(self, path: str, seq_per_step: int, min_interval: float = 30.0, updates=None):
         self.path = path
         self.seq_per_step = seq_per_step
         self.min_interval = min_interval
+        self.updates = updates  # an UpdateTracker, for the weight-update charts
         self._last = 0.0
         self._thread = None
 
@@ -155,5 +246,7 @@ class DashboardCallback(TrainerCallback):
             return
         self._last = time.time()
         history = [dict(h) for h in state.log_history]  # snapshot: training keeps appending
-        self._thread = threading.Thread(target=render, args=(history, state.max_steps, self.seq_per_step, self.path), daemon=True)
+        updates = list(self.updates.records) if self.updates is not None else None
+        self._thread = threading.Thread(target=render, args=(history, state.max_steps, self.seq_per_step, self.path, updates),
+                                        daemon=True)  # fmt: skip
         self._thread.start()

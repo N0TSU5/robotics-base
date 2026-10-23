@@ -48,7 +48,7 @@ def _sample(rng, n_views=2):
         "state": rng.normal(size=(9, 64)).astype(np.float32), "state_target": rng.normal(size=(9, 10)).astype(np.float32),
         "action_target": rng.normal(size=(9, 8, 7)).astype(np.float32), "action_valid": np.ones((9, 8), bool),
         "embodiment": 26, "instruction": "put the cup in the bowl" if n_views == 2 else "", "has_text": n_views == 2,
-        "dataset": "ur5", "action_zero": np.zeros(7, np.float32),
+        "dataset": "ur5", "action_zero": np.zeros(7, np.float32), "state_scale": np.ones(10, np.float32),
     }  # fmt: skip
 
 
@@ -82,7 +82,7 @@ def test_wrapper_trains_predictor_only_and_keeps_encoders_frozen(tokenizer):
     batch = SawyerCollator(tokenizer)([_sample(rng), _sample(rng, n_views=1)])
     batch.pop("dataset")  # the Trainer removes it before calling the model
     losses = model(**batch)
-    assert all(torch.isfinite(v) for v in losses.values())
+    assert all(torch.isfinite(v).all() for v in losses.values())
     losses["loss"].backward()
     assert model.predictor.visual_in.adapters[0].weight.grad is not None
     assert vjepa.proj.weight.grad is None and qwen.emb.weight.grad is None
@@ -249,3 +249,101 @@ def test_eval_mode_adds_baselines_training_mode_does_not(tokenizer):
     batch.pop("dataset")
     assert "action_zero" not in model.train()(**batch)
     assert {"visual_copy", "state_copy", "action_zero"} <= model.eval()(**batch).keys()
+
+
+def test_state_loss_is_measured_in_units_of_each_datasets_typical_change():
+    from sawyer.model import sawyer_loss
+
+    B, T = 2, 3
+    feats = torch.zeros(B, T, 1, 4, 8)
+    state_target = torch.zeros(B, T, 10)
+    state_next = torch.zeros(B, T, 10)
+    state_next[0] += 0.01  # sample 0 off by 0.01 everywhere, sample 1 exact
+    outputs = (feats.clone(), state_next, torch.zeros(B, T, 8, 7))
+    args = (feats, torch.ones(B, 1, dtype=torch.bool), state_target, torch.zeros(B, T, 8, 7), torch.ones(B, T, 8, dtype=torch.bool))
+    weights = {"visual": 1.0, "state": 1.0, "action": 1.0}
+    raw = sawyer_loss(outputs, *args, weights)["state"]
+    scaled = sawyer_loss(outputs, *args, weights, state_scale=torch.full((B, 10), 0.01))["state"]
+    torch.testing.assert_close(raw, torch.tensor(0.005))
+    torch.testing.assert_close(scaled, torch.tensor(0.5))  # 0.01 error = one typical step, averaged with an exact sample
+
+
+def test_per_sample_sums_reproduce_the_batch_losses():
+    from sawyer.model import sawyer_loss
+
+    torch.manual_seed(0)
+    B, T = 3, 4
+    feats, visual = torch.randn(B, T, 2, 5, 8), torch.randn(B, T, 2, 5, 8)
+    view_valid = torch.tensor([[True, True], [True, False], [True, True]])
+    action_valid = torch.rand(B, T, 8) > 0.3
+    out = sawyer_loss((visual, torch.zeros(B, T, 10), torch.randn(B, T, 8, 7)), feats, view_valid, torch.zeros(B, T, 10),
+                      torch.randn(B, T, 8, 7), action_valid, {"visual": 1.0, "state": 1.0, "action": 1.0})  # fmt: skip
+    torch.testing.assert_close(out["_action_sum"].sum() / out["_action_count"].sum(), out["action"])
+    torch.testing.assert_close(out["_visual_sum"].sum() / out["_visual_count"].sum(), out["visual"])
+
+
+def test_action_agreement_detects_shrinkage_and_correlation():
+    from sawyer.training import action_agreement
+
+    torch.manual_seed(0)
+    target = torch.randn(64, 8, 7)
+    valid = torch.ones(64, 8, dtype=torch.bool)
+    shrunk = action_agreement(0.25 * target, target, valid)
+    assert shrunk["corr_xyz"] > 0.99 and shrunk["corr_rot"] > 0.99 and abs(shrunk["spread"] - 0.25) < 1e-6
+    noise = action_agreement(torch.randn(64, 8, 7), target, valid)
+    assert abs(noise["corr_xyz"]) < 0.1 and abs(noise["spread"] - 1) < 0.15
+    valid[:, 4:] = False
+    target[:, 4:] = 1e6  # entries past the episode end must not count
+    assert action_agreement(0.5 * target, target, valid)["spread"] == pytest.approx(0.5)
+
+
+def test_trainer_accumulates_losses_per_dataset_without_mixing(tokenizer):
+    import types
+
+    from sawyer.training import PER_SAMPLE_KEYS, SawyerTrainer
+
+    rng = np.random.default_rng(0)
+    model = SawyerForTraining(SawyerConfig(**SMALL), FakeVJEPA(), FakeQwen(), image_size=32).train()
+    a, b = _sample(rng), _sample(rng)
+    b["dataset"] = "droid"
+    batch = SawyerCollator(tokenizer)([a, b])
+    fake = types.SimpleNamespace(_parts={"visual": 0.0, "state": 0.0, "action": 0.0}, _num_parts=0, _samples=0,
+                                 _dataset_ids={"droid": 0, "ur5": 1}, _per_dataset=None)  # fmt: skip
+    SawyerTrainer.compute_loss(fake, model, dict(batch))
+    per_sample = model.eval()(**{k: v for k, v in batch.items() if k != "dataset"})
+    for k in PER_SAMPLE_KEYS:
+        # row 0 = droid = sample b, row 1 = ur5 = sample a (eval and train passes match: no dropout)
+        torch.testing.assert_close(fake._per_dataset[k], per_sample[k].flip(0), rtol=1e-4, atol=1e-5)
+
+
+def test_update_ratios_per_block_and_group():
+    from sawyer.updates import COMPONENT_ROWS, GROUPS, update_ratios
+
+    torch.manual_seed(0)
+    model = SawyerForTraining(SawyerConfig(**SMALL), FakeVJEPA(), FakeQwen(), image_size=32)
+    for p in model.parameters():
+        p.grad = torch.randn_like(p)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.0)
+    opt.step()
+    out = update_ratios(model, opt, num_blocks=2)
+    assert set(out["blocks"]) == set(COMPONENT_ROWS) and all(len(v) == 2 for v in out["blocks"].values())
+    assert set(out["groups"]) == set(GROUPS)
+    # After one AdamW step m_hat / sqrt(v_hat) = sign(g), so the update norm is lr * sqrt(numel).
+    w = model.predictor.blocks[0].attn.qkv.weight
+    expected = 1e-3 * w.numel() ** 0.5 / w.norm().item()
+    assert out["blocks"]["self-attn qkv"][0] == pytest.approx(expected, rel=1e-3)
+
+
+def test_update_tracker_history_survives_restarts(tmp_path):
+    from types import SimpleNamespace
+
+    from sawyer.updates import UpdateTracker
+
+    path = tmp_path / "updates.jsonl"
+    path.write_text("".join(f'{{"step": {s}, "groups": {{}}}}\n' for s in [50, 100, 150, 100]))  # resumed at 100
+    tracker = UpdateTracker(str(path), num_blocks=2, every=50)
+    assert [r["step"] for r in tracker.records] == [50, 100]
+    model = SawyerForTraining(SawyerConfig(**SMALL), FakeVJEPA(), FakeQwen(), image_size=32)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    tracker.on_step_end(None, SimpleNamespace(is_world_process_zero=True, global_step=149), None, model=model, optimizer=opt)
+    assert [r["step"] for r in tracker.records] == [50, 100]  # not a multiple of `every`

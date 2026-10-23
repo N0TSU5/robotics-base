@@ -92,6 +92,7 @@ class WindowLoader:
             "has_text": window.has_text,
             "dataset": window.dataset,
             "action_zero": self.stats[config.name].normalize(np.zeros((1, 7)))[0],  # "no motion", for baselines
+            "state_scale": self.stats[config.name].state_scale_array(),  # divides state-loss errors per dataset
         }
 
 

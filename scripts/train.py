@@ -17,6 +17,7 @@ from sawyer.data.views import MAX_VIEWS
 from sawyer.encoders import FrozenQwen, FrozenVJEPA, load_tokenizer
 from sawyer.model import SawyerConfig
 from sawyer.training import SawyerCollator, SawyerForTraining, SawyerTrainer, param_groups
+from sawyer.updates import UpdateTracker
 
 ROBOJEPA_CKPT = "checkpoints/robojepa/cooldown_300m_300k.pth.tar"
 
@@ -36,7 +37,7 @@ def main():
     p.add_argument("--cache-gb", type=float, default=30)
     p.add_argument("--save-steps", type=int, default=250, help="checkpoint every N steps (~55 min)")
     p.add_argument("--eval-steps", type=int, default=250, help="validation every N steps (~45 min)")
-    p.add_argument("--val-windows", type=int, default=32, help="held-out windows per dataset")
+    p.add_argument("--val-windows", type=int, default=96, help="held-out windows per dataset (3x the old 32: ~1.7x less sampling noise)")
     p.add_argument("--logging-steps", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--resume", default=None, help="checkpoint dir, or 'latest'")
@@ -104,8 +105,11 @@ def main():
         seed=args.seed,
     )
     trainer = SawyerTrainer(model=model, args=training_args, train_dataset=dataset, eval_dataset=val_dataset,
-                            data_collator=SawyerCollator(load_tokenizer()), optimizers=(optimizer, None))  # fmt: skip
-    trainer.add_callback(DashboardCallback(f"{args.output}/dashboard.png", args.batch * args.accum))
+                            data_collator=SawyerCollator(load_tokenizer()), optimizers=(optimizer, None),
+                            dataset_names=[c.name for c in DATASETS])  # fmt: skip
+    updates = UpdateTracker(f"{args.output}/updates.jsonl", num_blocks=model.predictor.cfg.depth)
+    trainer.add_callback(updates)
+    trainer.add_callback(DashboardCallback(f"{args.output}/dashboard.png", args.batch * args.accum, updates=updates))
     trainer.train(resume_from_checkpoint=resume)
     trainer.save_model(f"{args.output}/final")
 
