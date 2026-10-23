@@ -11,7 +11,7 @@ from matplotlib.ticker import FuncFormatter
 from scipy.signal import lfilter
 from transformers import TrainerCallback
 
-from sawyer.updates import COMPONENT_ROWS, GROUPS
+from sawyer.updates import SERIES_PANELS, columns
 
 PANELS = [
     ("loss", "Total loss", True),
@@ -32,8 +32,8 @@ VAL_PANELS = [
     (lambda d: f"eval_{d}_visual", lambda d: f"eval_{d}_visual_copy", "Validation visual ÷ copy-frame baseline"),
     (lambda d: f"eval_{d}_state", lambda d: f"eval_{d}_state_copy", "Validation state ÷ copy-state baseline"),
 ]  # (metric, baseline it is divided by, title)
-# Component groups in the update-size chart: categorical slots 5-8, so they never share a hue with a dataset.
-GROUP_COLORS = dict(zip(GROUPS, ["#e87ba4", "#008300", "#6250d6", "#e34948"]))
+# Series in each update-size panel: categorical slots 5-8 in order, so they never share a hue with a dataset.
+UPDATE_COLORS = ["#e87ba4", "#008300", "#6250d6", "#e34948"]
 # Sequential blue ramp (light = small update, dark = large) for the heatmap.
 UPDATE_CMAP = LinearSegmentedColormap.from_list(
     "updates", ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
@@ -131,41 +131,74 @@ def _dataset_panel(ax, rows: list[dict], value, title: str, reference: float | N
     ax.legend(loc="best", fontsize=8, frameon=False, labelcolor=INK_2)
 
 
-def _update_groups_panel(ax, updates: list[dict]) -> None:
-    _style(ax, "Weight update per step, ‖Δw‖ / ‖w‖")
-    if not updates:
-        _empty(ax)
+def _update_series_panels(axes: list, updates: list[dict]) -> None:
+    """Relative update size over time for every trainable part, one small panel per stage of the network, all on
+    one log scale so the panels compare directly."""
+    panels = list(SERIES_PANELS.items())
+    for ax in axes[1:]:
+        ax.sharex(axes[0])
+        ax.sharey(axes[0])
+    ends = []  # (axes, series, last point) for the line-end labels, placed once the shared y range is known
+    for i, (ax, (panel, series)) in enumerate(zip(axes, panels)):
+        _style(ax, "Weight update per step, ‖Δw‖ / ‖w‖ (all trainable parts)" if i == 0 else "")
+        if i < len(axes) - 1:
+            ax.set_xlabel("")
+            ax.tick_params(labelbottom=False)
+        for name, color in zip(series, UPDATE_COLORS):
+            pts = np.array([(r["step"], r["series"][name]) for r in updates if name in r.get("series", {})], dtype=float)
+            if len(pts) == 0:
+                continue
+            ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=2, label=name)
+            ends.append((ax, name, pts[-1]))
+        ax.text(0.01, 0.95, panel, transform=ax.transAxes, va="top", color=INK, fontsize=8, weight="bold")
+        if ax.lines:
+            ax.legend(loc="lower left", ncol=len(ax.lines), fontsize=7, frameon=False, labelcolor=INK_2,
+                      handlelength=1.2, columnspacing=1.0)  # fmt: skip
+    if not ends:
+        for ax in axes:
+            _empty(ax)
         return
-    for group, color in GROUP_COLORS.items():
-        pts = np.array([(r["step"], r["groups"][group]) for r in updates if group in r.get("groups", {})], dtype=float)
-        if len(pts) == 0:
-            continue
-        ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=2, label=group)
-        ax.annotate(group, pts[-1], xytext=(4, 0), textcoords="offset points", va="center", color=INK_2, fontsize=8)
-    ax.set_yscale("log")
-    ax.legend(loc="best", fontsize=8, frameon=False, labelcolor=INK_2)
+    axes[0].set_yscale("log")
+    # Line-end labels, nudged apart in log space so lines ending close together keep readable labels.
+    lo, hi = np.log10(axes[0].get_ylim())
+    gap = 0.14 * (hi - lo)
+    for ax in axes:
+        mine = sorted((e for e in ends if e[0] is ax), key=lambda e: e[2][1])
+        y_prev = -np.inf
+        for _, name, (x, y) in mine:
+            y_label = max(np.log10(y), y_prev + gap)
+            ax.annotate(name, (x, y), xytext=(x, 10**y_label), textcoords="data", va="center", color=INK_2, fontsize=7,
+                        annotation_clip=False)  # fmt: skip
+            y_prev = y_label
 
 
 def _update_heatmap(ax, updates: list[dict]) -> None:
-    """Latest relative update for every block x component: which layers and parts are learning the most right now."""
-    if not updates or "blocks" not in updates[-1]:
-        _style(ax, "Relative weight update per block and component")
+    """Latest relative update for every trainable part at every position in the network (inputs, blocks, outputs):
+    which layers and parts are learning the most right now."""
+    latest = next((r for r in reversed(updates) if "cells" in r), None)
+    if latest is None:
+        _style(ax, "Relative weight update of every trainable part")
         _empty(ax)
         return
-    latest = updates[-1]
-    grid = np.array([latest["blocks"][c] for c in COMPONENT_ROWS], dtype=float)
+    rows = list(latest["cells"])
+    grid = np.array([latest["cells"][r] for r in rows], dtype=float)
     grid = np.ma.masked_invalid(np.where(grid > 0, grid, np.nan))
+    cols = columns(grid.shape[1] - 2)
     ax.set_facecolor(SURFACE)
-    ax.set_title(f"Relative weight update per block and component (‖Δw‖ / ‖w‖ per step, at step {latest['step']:,}); "
+    ax.set_title(f"Relative weight update of every trainable part (‖Δw‖ / ‖w‖ per step, at step {latest['step']:,}); "
                  "darker = changing faster", loc="left", color=INK, fontsize=10)  # fmt: skip
-    if grid.count() == 0:
-        _empty(ax)
-        return
     image = ax.imshow(grid, aspect="auto", cmap=UPDATE_CMAP, norm=LogNorm(vmin=grid.min(), vmax=grid.max()),
                       interpolation="nearest")  # fmt: skip
-    ax.set_yticks(range(len(COMPONENT_ROWS)), COMPONENT_ROWS)
-    ax.set_xticks(range(grid.shape[1]), [str(i) for i in range(grid.shape[1])])
-    ax.set_xlabel("block (0 = closest to the inputs)", color=MUTED, fontsize=8)
+    # Surface-colored gaps between the input, block and output sections, along both axes.
+    for x in (0.5, len(cols) - 1.5):
+        ax.axvline(x, color=SURFACE, linewidth=3)
+    filled = ~np.ma.getmaskarray(grid)
+    section = np.where(filled[:, 1:-1].any(1), 1, np.where(filled[:, 0], 0, 2))  # 0 inputs, 1 blocks, 2 outputs
+    for i in np.flatnonzero(np.diff(section)) + 1:
+        ax.axhline(i - 0.5, color=SURFACE, linewidth=3)
+    ax.set_yticks(range(len(rows)), rows)
+    ax.set_xticks(range(len(cols)), cols)
+    ax.set_xlabel("network position: inputs, block 0 (closest to the inputs) ... block 31, outputs", color=MUTED, fontsize=8)
     ax.tick_params(colors=MUTED, labelsize=8, length=0)
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -185,9 +218,12 @@ def render(history: list[dict], max_steps: int, seq_per_step: int, path: str, up
         return
     evals = [h for h in history if "eval_loss" in h]
     # Figure API, not pyplot: safe to render from the callback's background thread.
-    fig = Figure(figsize=(16, 19), facecolor=SURFACE, layout="constrained")
-    grid = fig.add_gridspec(5, 4, height_ratios=[1, 1, 1, 1, 0.9])
-    axes = np.array([[fig.add_subplot(grid[r, c]) for c in range(4)] for r in range(4)])
+    fig = Figure(figsize=(16, 25), facecolor=SURFACE, layout="constrained")
+    # Rows 3-6 are one row of charts, split in four so the update-size column holds four small panels (a nested
+    # gridspec would get constrained layout's full padding between each). Row 7 is the heatmap.
+    grid = fig.add_gridspec(8, 4, height_ratios=[1, 1, 1, 0.35, 0.35, 0.35, 0.35, 2.0])
+    axes = np.array([[fig.add_subplot(grid[r, c] if r < 3 else grid[3:7, c]) if (r, c) != (3, 3) else None
+                      for c in range(4)] for r in range(4)])  # fmt: skip
     for ax, (metric, baseline, title) in zip(axes[2], VAL_PANELS):
         _validation_panel(ax, evals, metric, baseline, title)
     _dataset_panel(axes[3, 0], rows, lambda h, d: h.get(f"train_{d}_action"), "Train action loss by dataset",
@@ -196,8 +232,8 @@ def render(history: list[dict], max_steps: int, seq_per_step: int, path: str, up
                    reference=0.0)  # fmt: skip
     _dataset_panel(axes[3, 2], evals, lambda h, d: h.get(f"eval_{d}_spread"),
                    "Val prediction spread ÷ true (1 = unshrunk)", reference=1.0)  # fmt: skip
-    _update_groups_panel(axes[3, 3], updates or [])
-    _update_heatmap(fig.add_subplot(grid[4, :]), updates or [])
+    _update_series_panels([fig.add_subplot(grid[3 + i, 3]) for i in range(len(SERIES_PANELS))], updates or [])
+    _update_heatmap(fig.add_subplot(grid[7, :]), updates or [])
     for ax, (key, title, log_y) in zip(axes[:2].flat, PANELS):
         pts = np.array([(h["step"], h[key]) for h in rows if key in h], dtype=float)
         _style(ax, title)

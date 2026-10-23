@@ -316,8 +316,8 @@ def test_trainer_accumulates_losses_per_dataset_without_mixing(tokenizer):
         torch.testing.assert_close(fake._per_dataset[k], per_sample[k].flip(0), rtol=1e-4, atol=1e-5)
 
 
-def test_update_ratios_per_block_and_group():
-    from sawyer.updates import COMPONENT_ROWS, GROUPS, update_ratios
+def test_update_ratios_cover_every_trainable_part():
+    from sawyer.updates import ROWS, SERIES, columns, update_ratios
 
     torch.manual_seed(0)
     model = SawyerForTraining(SawyerConfig(**SMALL), FakeVJEPA(), FakeQwen(), image_size=32)
@@ -326,12 +326,25 @@ def test_update_ratios_per_block_and_group():
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.0)
     opt.step()
     out = update_ratios(model, opt, num_blocks=2)
-    assert set(out["blocks"]) == set(COMPONENT_ROWS) and all(len(v) == 2 for v in out["blocks"].values())
-    assert set(out["groups"]) == set(GROUPS)
+    assert list(out["cells"]) == [r for r in ROWS if r != "other"]  # every part present, nothing unclassified
+    assert list(out["series"]) == [s for s in SERIES if s != "other"]
+    assert all(len(v) == len(columns(2)) for v in out["cells"].values())
     # After one AdamW step m_hat / sqrt(v_hat) = sign(g), so the update norm is lr * sqrt(numel).
     w = model.predictor.blocks[0].attn.qkv.weight
     expected = 1e-3 * w.numel() ** 0.5 / w.norm().item()
-    assert out["blocks"]["self-attn qkv"][0] == pytest.approx(expected, rel=1e-3)
+    assert out["cells"]["self-attn qkv"][1] == pytest.approx(expected, rel=1e-3)  # column 0 is the inputs
+    w = model.predictor.action_head[0].weight
+    expected = 1e-3 * w.numel() ** 0.5 / w.norm().item()
+    assert out["cells"]["action head in"][-1] == pytest.approx(expected, rel=1e-3)
+
+
+def test_full_size_predictor_has_no_unclassified_parameters():
+    from sawyer.model import SawyerPredictor
+    from sawyer.updates import OTHER, classify
+
+    with torch.device("meta"):
+        model = SawyerPredictor(SawyerConfig())
+    assert [n for n, _ in model.named_parameters() if classify(n)[0] == OTHER] == []
 
 
 def test_update_tracker_history_survives_restarts(tmp_path):
